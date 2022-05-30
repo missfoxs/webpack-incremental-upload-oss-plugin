@@ -1,81 +1,87 @@
-const md5 = require('md5-file')
-const fs = require('fs')
-const path = require('path')
-const OSS = require('ali-oss')
-const map = require('lodash/map')
-
-const defaultConfig = {
-  auth: {
-    region: '',
-    accessKeyId: '',
-    accessKeySecret: '',
-    bucket: '',
-    endpoint: '',
-  },
-};
+const md5 = require("md5");
+const fs = require("fs");
+const path = require("path");
+const OSS = require("ali-oss");
+const map = require("lodash/map");
 
 /**
- * 增量上传
+ * 获取所有文件
+ * @param {*} output
+ * @returns
  */
+const getPrevFiles = output => {
+  const list = fs.readdirSync(output);
+  let result = [];
+  list.forEach(filename => {
+    const filePath = output + "/" + filename;
+    const stat = fs.statSync(filePath);
+    if (stat.isFile()) {
+      result = [...result, filePath];
+    } else {
+      result = [...result, ...getPrevFiles(filePath)];
+    }
+  });
+  return result;
+};
+
 module.exports = class WebpackIncrementalUpload {
   constructor(props) {
-    this.assetList = []  // 打包后的文件
-    this.versionList = []  // 已缓存的文件 
-    this.#initClient()
+    this.outputPath = "";
+    this.#initClient(props);
   }
 
   apply(compiler) {
     if (compiler.hooks && compiler.hooks.emit) {
       // webpack 5
-      compiler.hooks.emit.tapAsync(
+      compiler.hooks.afterEmit.tapAsync(
         "WebpackIncrementalUpload",
         (compilation, cb) => {
-          this.pluginEmitFn(compilation, cb);
+          this.outputPath = compiler.outputPath;
+          // this.clearBucket();
         }
       );
     } else {
       compiler.plugin("emit", (compilation, cb) => {
-        this.pluginEmitFn(compilation, cb);
+        this.outputPath = compiler.outputPath;
+        // this.clearBucket();
       });
     }
   }
 
-  #initClient() {
-    const config = fs.readFileSync(path.resolve(__dirname, './oss.conf'), 'utf8').split('|')
-    this.client = new OSS({
-      region: config[0].split('.')[0],
-      accessKeyId: config[1],
-      accessKeySecret: config[2],
-      bucket: config[3],
-      endpoint: `https://${config[0]}`
-    })
+  #initClient(config) {
+    this.client = new OSS(config);
   }
 
-  getAssetsInfo(compilation) {
-    const matched = {}
-    const keys = Object.keys(compilation.assets)
-    for (let i = 0; i < keys.length; i++) {
-      // if (!this.config.exclude.test(keys[i])) {
-        matched[keys[i]] = compilation.assets[keys[i]]
-      // }
+  // 上传文件
+  uploadFile(filename) {
+    const path = this.outputPath + "/" + filename;
+    return this.client.put(filename + Math.random().toString(36), path);
+  }
+
+  // 清空bucket，没找到清空方法，一个一个删除吧。
+  clearBucket() {
+    const prevFiles = getPrevFiles(this.outputPath).map(file =>
+      file.replace(this.outputPath + "/", "")
+    );
+    const deleteList = prevFiles.map(filename => this.deleteFile(filename));
+    Promise.all(deleteList).then(res => {
+      this.startUpload();
+    });
+  }
+
+  deleteFile(filename) {
+    return this.client.delete(filename);
+  }
+
+  startUpload(compilation, cb) {
+    const assets = compilation.assets;
+    const uploads = [];
+    for (let key in assets) {
+      uploads.push(this.uploadFile(key));
     }
-    return map(matched, (value, name) => ({
-      name,
-      path: value.existsAt,
-      content: value.source()
-    }))
-  }
-
-  pluginEmitFn(compilation, cb) {
-    // this.uploadFiles()
-    const list = this.getAssetsInfo(compilation);
-    console.log('list', list);
+    Promise.all(uploads).then(res => {
+      console.log(res);
+    });
     cb();
   }
-
-  async uploadFiles() {
-    // this.assetList.forEach(file => {
-      await this.client.put('test', this.assetList[0])
-    // })
-  }  
 };
